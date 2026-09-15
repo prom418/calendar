@@ -14,7 +14,7 @@ import { useLoadRetry } from "@/lib/use-load-retry";
 import { usePreferences } from "./preferences-context";
 
 export function DashboardWorkspace() {
-  const { settings, readOnly } = usePreferences();
+  const { settings, readOnly, loading:preferencesLoading } = usePreferences();
   const [todayEvents, setTodayEvents] = useState<ApiEvent[]>([]);
   const [weekEvents, setWeekEvents] = useState<ApiEvent[]>([]);
   const [nextCritical, setNextCritical] = useState<ApiEvent|null>(null);
@@ -24,6 +24,12 @@ export function DashboardWorkspace() {
   const { attempt, retry } = useLoadRetry(Boolean(error), loading);
 
   useEffect(() => {
+    // Wait until the access mode is known. `readOnly` starts as false, so
+    // without this the first pass always called fetchChanges(), which the public
+    // proxy rejects with 403 by design -- one guaranteed-failed request and a
+    // console error on every dashboard load of the public site. Same guard as
+    // live-changes-feed.tsx.
+    if (preferencesLoading) return;
     let cancelled = false;
     async function load() {
       setLoading(true);
@@ -64,7 +70,7 @@ export function DashboardWorkspace() {
     }
     void load();
     return () => { cancelled = true; };
-  }, [readOnly, settings.markets, settings.timezone, attempt]);
+  }, [readOnly, preferencesLoading, settings.markets, settings.timezone, attempt]);
 
   const upcomingToday = useMemo(() => todayEvents.filter(isUpcoming).length, [todayEvents]);
   const importantWeek = useMemo(() => weekEvents.filter((event) => event.importance === "critical" || event.importance === "high").slice(0, 3), [weekEvents]);
