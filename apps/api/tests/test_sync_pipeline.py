@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -8,19 +9,23 @@ from trade_calendar.adapters.base import SourceAdapter
 from trade_calendar.adapters.bls import BlsCalendarAdapter, raw_payload_from_fixture
 from trade_calendar.adapters.fed import FedFomcAdapter
 from trade_calendar.adapters.http import HttpFetcher
-from trade_calendar.adapters.types import RawPayload, SourceEvent
+from trade_calendar.adapters.types import NormalizedEvent, RawPayload, SourceEvent
+from trade_calendar.models.base import utc_now
 from trade_calendar.models.domain import (
+    DatePrecision,
     Event,
     EventChange,
     EventSource,
+    EventStatus,
     EventVersion,
     FetchRun,
+    Importance,
     RunStatus,
     Source,
     SourceHealth,
 )
-from trade_calendar.services import normalize_title
-from trade_calendar.sync import SyncRunner, make_run
+from trade_calendar.services import canonical_key, normalize_title
+from trade_calendar.sync import SyncRunner, find_match, make_run
 
 FIXTURE = Path(__file__).parent / "fixtures" / "bls" / "calendar.json"
 FED_FIXTURE = Path(__file__).parent / "fixtures" / "fed" / "fomc-calendar.html"
@@ -247,3 +252,89 @@ async def test_reissued_source_ids_reuse_one_event_source_link(
     async with session_factory() as session:
         assert await session.scalar(select(func.count(Event.id))) == 3
         assert await session.scalar(select(func.count(EventSource.id))) == 3
+
+
+def _dgbas_release(starts_at: datetime | None) -> NormalizedEvent:
+    """One DGBAS release: shared institution, title and `notice`, moving date.
+
+    Mirrors the real row that went wrong -- every field the merge rules compare
+    except the date is identical between releases of the same statistic.
+    """
+    return NormalizedEvent(
+        source_event_id=f"dgbas-2000-{starts_at.isoformat() if starts_at else 'undated'}",
+        title_zh="台湾统计：Employee Compensation and Turnover Statistics",
+        title_original="Employee Compensation and Turnover Statistics",
+        institution="Directorate-General of Budget, Accounting and Statistics",
+        country_code="TW",
+        category="macro_release",
+        event_type="employment",
+        status=EventStatus.CONFIRMED,
+        importance=Importance.HIGH,
+        date_precision=DatePrecision.MINUTE if starts_at else DatePrecision.UNKNOWN,
+        starts_at=starts_at,
+        original_timezone="Asia/Taipei",
+        reference_period="(2025)",
+        market_tags=["TW"],
+        source_url="https://eng.stat.gov.tw/",
+    )
+
+
+def _event_row(item: NormalizedEvent) -> Event:
+    return Event(
+        canonical_key=canonical_key(
+            item.institution, item.event_type, item.title_original,
+            item.starts_at, item.local_date,
+        ),
+        title_zh=item.title_zh,
+        title_original=item.title_original,
+        normalized_title=normalize_title(item.title_original),
+        institution=item.institution,
+        country_code=item.country_code,
+        category=item.category,
+        event_type=item.event_type,
+        status=item.status,
+        importance=item.importance,
+        date_precision=item.date_precision,
+        starts_at=item.starts_at,
+        local_date=item.local_date,
+        original_timezone=item.original_timezone,
+        reference_period=item.reference_period,
+        market_tags=item.market_tags,
+        tickers=item.tickers,
+        reminder_enabled=True,
+        is_manual=False,
+        last_verified_at=utc_now(),
+    )
+
+
+async def test_a_second_occurrence_of_the_same_release_is_not_merged(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    september = _dgbas_release(datetime(2026, 9, 14, 8, tzinfo=UTC))
+    async with session_factory() as session:
+        session.add(_event_row(september))
+        await session.commit()
+
+    async with session_factory() as session:
+        matched, score, reason = await find_match(
+            session, _dgbas_release(datetime(2026, 10, 15, 8, tzinfo=UTC))
+        )
+    assert matched is None
+    assert score == 0.0
+    assert reason == "no plausible canonical event found"
+
+
+async def test_the_same_occurrence_without_a_date_still_merges(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The rule's original purpose survives: a second source that has not pinned
+    the date yet is the same occurrence, not a different one."""
+    september = _dgbas_release(datetime(2026, 9, 14, 8, tzinfo=UTC))
+    async with session_factory() as session:
+        session.add(_event_row(september))
+        await session.commit()
+
+    async with session_factory() as session:
+        matched, score, _ = await find_match(session, _dgbas_release(None))
+    assert matched is not None
+    assert score == 0.99

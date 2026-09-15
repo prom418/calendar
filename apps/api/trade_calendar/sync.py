@@ -1,7 +1,7 @@
 import hashlib
 import json
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from difflib import SequenceMatcher
 from uuid import UUID
 
@@ -358,9 +358,17 @@ async def find_match(
                 "ticker + event_type + compatible reporting period + nearby date"
             )
         if same_institution and same_reference and normalized == candidate_title:
-            return candidate, 0.99, (
-                "institution + event_type + reference period + normalized title"
-            )
+            # The date is required here as well. A reference period does not
+            # identify an occurrence: Taiwan's DGBAS reuses one `notice` value
+            # across several releases of the same statistic, so matching on
+            # institution + period + title alone folded every release into a
+            # single event whose starts_at flip-flopped between dates on each
+            # sync -- one event in the dev database reached version 30, and the
+            # calendar showed whichever release synced last.
+            if dates_compatible(candidate_date, target_date):
+                return candidate, 0.99, (
+                    "institution + event_type + reference period + normalized title"
+                )
         if same_institution and candidate_date == target_date and similarity >= 0.88:
             return candidate, 0.98, "institution + event_type + date + similar title"
         if candidate_date == target_date and normalized == candidate_title:
@@ -388,6 +396,18 @@ def reference_periods_compatible(left: str | None, right: str | None) -> bool:
         return False
     periods = {left_match.group(2), right_match.group(2)}
     return periods in ({"Q2", "H1"}, {"Q4", "H2"})
+
+
+def dates_compatible(left: date | None, right: date | None) -> bool:
+    """Can two occurrence dates describe the same event?
+
+    An unknown date on either side is compatible: that is the case this exists
+    to serve, where the same occurrence is reported by a second source that has
+    not pinned the date yet. Two known but different dates are not compatible --
+    they are different occurrences, and merging them is what produced the bug
+    below.
+    """
+    return left is None or right is None or left == right
 
 
 async def primary_source_priority(session: AsyncSession, event_id: UUID) -> int:
