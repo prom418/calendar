@@ -8,16 +8,23 @@
     "directory": ".open-next/assets",
     "binding": "ASSETS"
   },
+  // NOTE: the `vpc_services` block (binding CALENDAR_API) has been removed for
+  // this deployment. VPC Service bindings are not available on this Cloudflare
+  // account -- /accounts/<id>/vpc_services returns "No route for that URI" --
+  // and the previous entry pointed at a service_id owned by a *different*
+  // account, which made `wrangler deploy` fail outright.
+  //
+  // To reach the local FastAPI backend again, either:
+  //   (a) create a VPC service + Cloudflare Tunnel in this account and restore
+  //       the binding below, or
+  //   (b) expose the backend through a public tunnel hostname and set
+  //       INTERNAL_API_URL to it (read by src/app/api/[...path]/route.ts).
+  // "vpc_services": [
+  //   { "binding": "CALENDAR_API", "service_id": "<new-service-id>", "remote": false }
+  // ],
   "vars": {
     "PUBLIC_READ_ONLY": "1"
   },
-  "vpc_services": [
-    {
-      "binding": "CALENDAR_API",
-      "service_id": "01a060b3-210b-7783-b3c5-75cd9d1c70fc",
-      "remote": false
-    }
-  ],
   "observability": {
     "enabled": true
   }
