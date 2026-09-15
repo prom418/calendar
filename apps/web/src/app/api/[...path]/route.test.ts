@@ -5,6 +5,7 @@ import {
   isPublicApiAllowed,
   isSelfReferentialOrigin,
   resolveApiOrigin,
+  resolveInternalApiSecret,
   sanitizePublicEvents,
 } from "./route";
 
@@ -69,5 +70,17 @@ describe("API proxy origin", () => {
       items:[{ id:"official", is_manual:false, notes:null, reminder_enabled:false }],
       total:1,
     });
+  });
+});
+
+describe("internal API secret", () => {
+  it("treats unset and blank values as no gate rather than an open one", () => {
+    expect(resolveInternalApiSecret(undefined)).toBeNull();
+    expect(resolveInternalApiSecret("")).toBeNull();
+    expect(resolveInternalApiSecret("   ")).toBeNull();
+  });
+
+  it("trims a configured secret so the Worker and API agree byte for byte", () => {
+    expect(resolveInternalApiSecret("  shared-secret-value  ")).toBe("shared-secret-value");
   });
 });

@@ -31,6 +31,18 @@ export function isSelfReferentialOrigin(apiOrigin: string, requestOrigin: string
   return new URL(apiOrigin).origin === new URL(requestOrigin).origin;
 }
 
+/**
+ * The shared secret the API requires on every route except /health, /ready and
+ * /calendar/*. A blank value counts as "not configured" so that an empty
+ * INTERNAL_API_SECRET cannot masquerade as a working gate.
+ */
+export function resolveInternalApiSecret(
+  configured = process.env.INTERNAL_API_SECRET,
+): string | null {
+  const value = configured?.trim();
+  return value ? value : null;
+}
+
 export function isAccessRejection(response: Response): boolean {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   return (response.status === 401 || response.status === 403) && contentType.includes("text/html");
@@ -129,6 +141,11 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path:str
     headers.set("CF-Access-Client-Id", accessClientId);
     headers.set("CF-Access-Client-Secret", accessClientSecret);
   }
+  // The API has no user accounts, so a public Tunnel would expose every route.
+  // This shared secret is the gate: it is added here, never accepted from the
+  // browser (see FORWARDED_REQUEST_HEADERS), so visitors cannot forge it.
+  const internalApiSecret = resolveInternalApiSecret();
+  if (internalApiSecret) headers.set("X-Internal-Api-Secret", internalApiSecret);
   const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
   const upstreamRequest = new Request(target, {
     method:request.method,

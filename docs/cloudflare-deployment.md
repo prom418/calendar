@@ -105,6 +105,74 @@ cd apps/web
 npx wrangler deploy
 ```
 
+## API 共享密钥网关（2026-09-15）
+
+**为什么需要**：`apps/api/trade_calendar/main.py` 里的 6 个 router 全部直接
+`include_router`，**没有任何鉴权依赖**——API 一直只靠网络隔离。一旦经 Tunnel 暴露到
+公网，任何人知道域名就能读写设置、触发同步、改事件。所以先把网关做出来，再谈暴露。
+
+**做法**：新增 `Settings.internal_api_secret`（`CALENDAR_INTERNAL_API_SECRET` 或
+`INTERNAL_API_SECRET`，两种写法等价）。只要它被配置，中间件
+`require_internal_api_secret` 就要求每个请求带 `X-Internal-Api-Secret` 头，不匹配返回
+401。未配置则网关关闭，这是本地开发与单测的默认状态。
+
+故意保持开放的路径：
+
+- `/health`、`/ready`：Tunnel 与本地工具探活需要；
+- `/calendar/*`：ICS 订阅本身用不可猜的路径 token 保护，而且日历客户端**无法发送自定义
+  头**，给这条路径加头会直接废掉订阅。
+
+**谁来带头**：`apps/web/src/app/api/[...path]/route.ts` 在代理时附加
+`X-Internal-Api-Secret`（取自 `process.env.INTERNAL_API_SECRET`），位置与已有的
+`CF-Access-Client-Id/Secret` 一致。浏览器永远拿不到这个值——它不在
+`FORWARDED_REQUEST_HEADERS` 里，客户端伪造的同名头会被丢弃。
+
+**密钥来源**：仓库根 `.env` 的 `INTERNAL_API_SECRET` 是唯一事实来源。
+`.local/dev-native.ps1` 会把它取出来注入 Next.js 开发进程，因此本地开发照常可用。
+Cloudflare 侧必须配置同名 secret：
+
+```powershell
+cd apps/web
+npx wrangler secret put INTERNAL_API_SECRET   # 粘贴 .env 里的值
+```
+
+**实测结果**（quick tunnel，2026-09-15）：
+
+| 请求 | 结果 |
+| --- | --- |
+| `GET /health`（无密钥） | 200 |
+| `GET /api/v1/sources`（无密钥） | 401 |
+| `GET /api/v1/sources`（错误密钥） | 401 |
+| `GET /api/v1/sources`（正确密钥） | 200 |
+| `GET /api/v1/events`（正确密钥） | 200，`total` 549 |
+
+用例在 `apps/api/tests/test_internal_api_secret.py`。`tests/conftest.py` 有一个
+autouse fixture 在单测中关闭网关，这样即使 `.env` 里存在密钥，既有用例仍确定性通过。
+
+## 无域名账户的连通方案：quick tunnel
+
+该账户没有 zone，也没有 Workers VPC，所以 named tunnel + VPC Service 那条路走不通。
+改用 quick tunnel（`trycloudflare.com`），不需要登录、域名或 token：
+
+```powershell
+.\.local\tunnel-quick.ps1
+```
+
+脚本会拒绝在 `INTERNAL_API_SECRET` 未配置时启动（否则等于把可写 API 公开）、检查本地
+API 是否存活、启动 cloudflared、抓出分配到的公网域名，并**自检**「无密钥 401 / 有密钥
+200」，最后打印需要执行的 wrangler 命令。
+
+quick tunnel 的域名是随机且每次重启都变的，所以 `INTERNAL_API_URL` 要跟着更新：
+
+```powershell
+cd apps/web
+npx wrangler deploy --var INTERNAL_API_URL:https://<随机>.trycloudflare.com
+```
+
+走控制台 Git 集成时，把 `INTERNAL_API_URL` 配成构建变量、`INTERNAL_API_SECRET` 配成
+secret。想要稳定域名，就得给账户挂一个域名（走 Access 保护的 named tunnel），或者升级
+Workers Paid 改用 VPC Service。
+
 ## 安全注意
 
 - GitHub 仓库保持 Private；

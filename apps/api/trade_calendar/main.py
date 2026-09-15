@@ -1,4 +1,5 @@
 import logging
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -59,6 +60,52 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
     allow_headers=["Content-Type", "Idempotency-Key", "X-CSRF-Token", "X-Request-ID"],
 )
+
+INTERNAL_API_SECRET_HEADER = "X-Internal-Api-Secret"
+# /health and /ready stay open so the Tunnel and local tooling can probe the
+# process, and /calendar/* keeps its own unguessable path token -- ICS clients
+# cannot send custom headers, so gating that route would break subscriptions.
+INTERNAL_API_SECRET_EXEMPT_PATHS = frozenset({"/health", "/ready"})
+INTERNAL_API_SECRET_EXEMPT_PREFIXES = ("/calendar/",)
+
+
+@app.middleware("http")
+async def require_internal_api_secret(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Reject callers that do not hold the shared secret.
+
+    The API itself has no user accounts; it relies on network isolation, so a
+    public Tunnel would otherwise expose every route -- including writes -- to
+    anyone who learns the hostname. When ``internal_api_secret`` is configured
+    the secret becomes the gate. Unset means "gate disabled", which is the
+    local development and unit test default.
+    """
+    secret = settings.internal_api_secret
+    # A blank value counts as "not configured". Otherwise an empty
+    # INTERNAL_API_SECRET in .env would look like a working gate while actually
+    # accepting every request that simply omits the header.
+    if secret is None or not secret.get_secret_value().strip():
+        return await call_next(request)
+    path = request.url.path
+    if path in INTERNAL_API_SECRET_EXEMPT_PATHS or path.startswith(
+        INTERNAL_API_SECRET_EXEMPT_PREFIXES
+    ):
+        return await call_next(request)
+    supplied = request.headers.get(INTERNAL_API_SECRET_HEADER, "")
+    if not secrets.compare_digest(
+        supplied.encode("utf-8"), secret.get_secret_value().encode("utf-8")
+    ):
+        logger.warning({"event": "internal_api_secret_rejected", "path": path})
+        return JSONResponse(
+            status_code=401,
+            content={"error": {
+                "code": "unauthorized",
+                "message": "缺少或无效的内部 API 凭据",
+                "request_id": getattr(request.state, "request_id", "unknown"),
+            }},
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")

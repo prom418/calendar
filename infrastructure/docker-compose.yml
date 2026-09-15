@@ -85,6 +85,10 @@ services:
       dockerfile: Dockerfile
     environment:
       INTERNAL_API_URL: http://api:8000
+      # Must match the INTERNAL_API_SECRET the API reads from ../.env. Passed
+      # explicitly (rather than via env_file) so the web container never receives
+      # the database credentials.
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:

@@ -6,8 +6,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from trade_calendar.core.database import get_session
-from trade_calendar.main import app
+from trade_calendar.main import app, settings
 from trade_calendar.models import Base
+
+
+@pytest.fixture(autouse=True)
+def _disable_internal_api_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the shared-secret gate off for the unit suite.
+
+    The gate switches on as soon as ``INTERNAL_API_SECRET`` is present in the
+    root ``.env``, which is the case on the machine that also runs the Tunnel.
+    The suite tests API behaviour rather than the gate, so turn it off here;
+    ``test_internal_api_secret.py`` switches it back on to cover the gate.
+    """
+    monkeypatch.setattr(settings, "internal_api_secret", None)
 
 
 @pytest.fixture
