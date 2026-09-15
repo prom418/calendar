@@ -12,6 +12,32 @@ const FORWARDED_REQUEST_HEADERS = [
   "x-request-id",
 ] as const;
 
+/**
+ * Hosts that only ever make sense when the API runs beside the Web process.
+ *
+ * A deployed Worker must never dial these. Cloudflare's edge refuses to connect
+ * to a loopback address and answers `403` with the body `error code: 1003`, and
+ * because that response is `text/plain` the proxy cannot classify it as an
+ * Access rejection -- it reaches the browser as a bare 403 that looks like an
+ * application bug instead of the honest "事件服务尚未连接" the UI expects.
+ *
+ * This is not hypothetical: OpenNext bakes the project's `.env*` files into the
+ * Worker at build time (`next-env.mjs`), so `apps/web/.env.local`'s
+ * `INTERNAL_API_URL=http://127.0.0.1:8000` -- the native-development value --
+ * silently became the deployed configuration and blanked every page.
+ */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host === "::1" || host === "0.0.0.0") return true;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const first = Number(ipv4[1]);
+    return first === 127 || first === 0;
+  }
+  return false;
+}
+
 export function resolveApiOrigin(
   configured = process.env.INTERNAL_API_URL,
   environment = process.env.NODE_ENV,
@@ -21,6 +47,10 @@ export function resolveApiOrigin(
   try {
     const url = new URL(value);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    // Docker Compose reaches the API as `http://api:8000`, so only loopback is
+    // refused here -- that keeps the containerised deployment working while a
+    // leaked `.env.local` can no longer hijack a deployed Worker.
+    if (environment !== "development" && isLoopbackHost(url.hostname)) return null;
     return url.origin;
   } catch {
     return null;

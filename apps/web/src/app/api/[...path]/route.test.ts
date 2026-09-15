@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isAccessRejection,
+  isLoopbackHost,
   isPublicApiAllowed,
   isSelfReferentialOrigin,
   resolveApiOrigin,
@@ -12,6 +13,40 @@ import {
 describe("API proxy origin", () => {
   it("does not point a production Worker at its own loopback interface", () => {
     expect(resolveApiOrigin(undefined, "production")).toBeNull();
+  });
+
+  it("refuses a loopback origin that was baked in from a local .env file", () => {
+    // OpenNext writes apps/web/.env* into next-env.mjs, so the native-dev value
+    // would otherwise become the deployed configuration and every API call
+    // would come back as Cloudflare's `403 error code: 1003`.
+    for (const value of [
+      "http://127.0.0.1:8000",
+      "http://localhost:8000",
+      "http://127.9.9.9:8000",
+      "http://[::1]:8000",
+      "http://0.0.0.0:8000",
+    ]) {
+      expect(resolveApiOrigin(value, "production")).toBeNull();
+    }
+  });
+
+  it("still accepts the Docker Compose service hostname in production", () => {
+    expect(resolveApiOrigin("http://api:8000", "production")).toBe("http://api:8000");
+  });
+
+  it("keeps loopback reachable in development", () => {
+    expect(resolveApiOrigin("http://127.0.0.1:8000", "development")).toBe("http://127.0.0.1:8000");
+    expect(resolveApiOrigin("http://localhost:8000", "development")).toBe("http://localhost:8000");
+  });
+
+  it("classifies loopback hosts without catching look-alikes", () => {
+    expect(isLoopbackHost("localhost")).toBe(true);
+    expect(isLoopbackHost("api.localhost")).toBe(true);
+    expect(isLoopbackHost("127.0.0.1")).toBe(true);
+    expect(isLoopbackHost("[::1]")).toBe(true);
+    expect(isLoopbackHost("api")).toBe(false);
+    expect(isLoopbackHost("127.0.0.1.example.com")).toBe(false);
+    expect(isLoopbackHost("172.19.0.3")).toBe(false);
   });
 
   it("keeps the local API fallback for development", () => {

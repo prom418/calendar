@@ -173,6 +173,67 @@ npx wrangler deploy --var INTERNAL_API_URL:https://<随机>.trycloudflare.com
 secret。想要稳定域名，就得给账户挂一个域名（走 Access 保护的 named tunnel），或者升级
 Workers Paid 改用 VPC Service。
 
+## 首次上线后页面全空：`next-env.mjs` 把本机地址烤进了 Worker（2026-09-15）
+
+**症状**：`https://trade-calendar.prom418.workers.dev` 能打开，但总览、日/周/月历、数据源
+全部为空；页面顶部报「事件 API 返回 403」「来源 API 返回 403」。而同一时刻本机
+`http://localhost:3000` 一切正常。
+
+**根因**：部署到 Cloudflare 的 Worker 在向 `http://127.0.0.1:8000` 发请求。
+
+链路是这样的：
+
+1. `apps/web/.env.local`（原生开发用，git 忽略）写着
+   `INTERNAL_API_URL=http://127.0.0.1:8000`；
+2. `@opennextjs/cloudflare` 构建时会把项目的 `.env*` 编译成
+   `.open-next/cloudflare/next-env.mjs`，Worker 运行时用它填充 `process.env`
+   （见 `dist/cli/utils/extract-project-env-vars.js`：读取 `.env`、`.env.{mode}`、
+   `.env.local`、`.env.{mode}.local`）；
+3. 于是**生产 Worker 也拿到了本机回环地址**，`resolveApiOrigin()` 认为它合法，
+   代理就去 fetch 自己的 loopback；
+4. Cloudflare 边缘拒绝连回环地址，返回 `403` + 纯文本 `error code: 1003`。
+   因为 `content-type` 是 `text/plain`，`isAccessRejection()` 不认它，
+   原样透传给浏览器 —— 前端只能显示「事件 API 返回 403」，看起来像应用 bug。
+
+注意 Worker 上**根本没有** `INTERNAL_API_URL` 绑定：`wrangler.jsonc` 里没有，也没用
+`--var` 传过。所以这不是「忘了配」，而是构建产物里自带了一个错的。
+
+**修法（两层）**：
+
+1. `src/app/api/[...path]/route.ts` 新增 `isLoopbackHost()`，生产环境拒绝回环来源
+   （`localhost`、`127.0.0.0/8`、`0.0.0.0`、`::1`）。Docker Compose 用的
+   `http://api:8000` 是单标签主机名，不受影响；开发环境照旧允许回环。
+   这样即使本机地址又被烤进去，也只会得到诚实的 `503 api_unavailable`，
+   而不是误导性的 403。用例在 `route.test.ts`。
+2. `.local/build-cloudflare.ps1` 在构建前把 `.env.local` / `.env.production.local`
+   挪开、构建后还原，并在部署前检查 `next-env.mjs` 里是否还有回环值，
+   有就直接失败、拒绝部署。
+
+**接线（让线上真的显示本机数据）**：该账户没有 VPC Service，只能走公网
+quick tunnel。`.local/arm-cloudflare.ps1` 一条命令做完：校验密钥 → 探活本机 API →
+起 cloudflared 并抓域名 → 自检「匿名 401 / 带密钥 200」→ 写入 `tunnel-url.txt` →
+调用 `build-cloudflare.ps1 -ApiUrl <url>` 构建并部署。
+
+**前提是 API 的共享密钥网关必须真的开着**。本机 API 之前在跑的是加网关之前的代码，
+匿名请求也能 200；直接挂公网等于把可写 API 公开。重启 API（`dev-native.ps1` 或手动
+uvicorn）后它才从根 `.env` 读到 `INTERNAL_API_SECRET` 并启用网关，实测：
+
+| 请求 | 结果 |
+| --- | --- |
+| 公网隧道 `GET /health`（无密钥） | 200 |
+| 公网隧道 `GET /api/v1/events`（无密钥） | 401 |
+| 公网隧道 `GET /api/v1/sources`（无密钥） | 401 |
+| 公网隧道 `GET /openapi.json`（无密钥） | 401 |
+| 公网隧道 `GET /api/v1/events`（正确密钥） | 200 |
+
+**部署时必须带 `--var`**：quick tunnel 域名每次重启都变，所以
+`INTERNAL_API_URL` 不能写进 `wrangler.jsonc`，而是由 `.local/tunnel-url.txt` 记录、
+部署时用 `--var INTERNAL_API_URL:<url>` 传入。**裸跑 `npx wrangler deploy` 会把这个
+变量丢掉、站点重新变空** —— 始终通过 `build-cloudflare.ps1` 或 `arm-cloudflare.ps1` 部署。
+
+**遗留脆弱点**：本机必须开着，cloudflared 必须常驻；隧道一停，线上立刻回到 503。
+稳定方案仍是给账户挂域名走 named tunnel，或升级 Workers Paid 用 VPC Service。
+
 ## 安全注意
 
 - GitHub 仓库保持 Private；
