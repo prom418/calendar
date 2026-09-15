@@ -296,7 +296,14 @@ def event_query(
     if country:
         statement = statement.where(Event.country_code == country.upper())
     if market:
-        statement = statement.where(Event.market_tags.contains([market.upper()]))
+        # market_tags is a generic JSON column, so .contains([...]) renders a
+        # `LIKE` comparison, which PostgreSQL rejects with
+        # "operator does not exist: json ~~ text". Match the quoted JSON element
+        # instead; this works on both PostgreSQL and SQLite. The surrounding
+        # quotes keep "US" from matching "USA".
+        statement = statement.where(
+            cast(Event.market_tags, String).ilike(f'%"{market.upper()}"%')
+        )
     if category:
         statement = statement.where(Event.category == category)
     if importance:

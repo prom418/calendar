@@ -5,6 +5,7 @@ from icalendar import Calendar
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from trade_calendar.core.config import get_settings
 from trade_calendar.models.domain import Notification, NotificationStatus
 from trade_calendar.schemas.events import EventCreate
 from trade_calendar.services import create_event
@@ -137,14 +138,15 @@ async def test_token_rotation_invalidates_old_feed(
     client: AsyncClient, minute_event_payload: dict[str, object]
 ) -> None:
     await client.post("/api/v1/events", json=minute_event_payload)
-    old = await client.get("/calendar/development-ics-token.ics")
+    configured_token = get_settings().ics_token.get_secret_value()
+    old = await client.get(f"/calendar/{configured_token}.ics")
     assert old.status_code == 200
     assert old.headers["content-type"].startswith("text/calendar")
 
     rotated = await client.post("/api/v1/ics-token/rotate")
     assert rotated.status_code == 201
     token = rotated.json()["token"]
-    assert (await client.get("/calendar/development-ics-token.ics")).status_code == 404
+    assert (await client.get(f"/calendar/{configured_token}.ics")).status_code == 404
     assert (await client.get(f"/calendar/{token}.ics")).status_code == 200
 
 
