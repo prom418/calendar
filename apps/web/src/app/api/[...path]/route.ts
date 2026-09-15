@@ -78,6 +78,26 @@ export function isAccessRejection(response: Response): boolean {
   return (response.status === 401 || response.status === 403) && contentType.includes("text/html");
 }
 
+/**
+ * Statuses Cloudflare returns when there is no origin behind the Tunnel: 530
+ * ("origin unreachable"), or 502/504 when the connector itself cannot be
+ * reached. These are infrastructure failures, not answers from the API, so the
+ * proxy should report them the same way it reports a refused connection --
+ * otherwise a dead Tunnel surfaces as a bare `事件 API 返回 530` instead of the
+ * documented "事件服务暂时不可达".
+ *
+ * A JSON body means the API answered (a real 503 during startup, say), so only
+ * non-JSON bodies are treated as unreachable. Observed live: killing cloudflared
+ * made `/api/v1/events` return 530 straight through to the browser.
+ */
+const UPSTREAM_UNREACHABLE_STATUSES = new Set([502, 503, 504, 530]);
+
+export function isUpstreamUnreachable(response: Response): boolean {
+  if (!UPSTREAM_UNREACHABLE_STATUSES.has(response.status)) return false;
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  return !contentType.includes("application/json");
+}
+
 function apiUnavailable(message: string) {
   return Response.json(
     { error: { code:"api_unavailable", message } },
@@ -193,6 +213,9 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path:str
   }
   if (isAccessRejection(upstream)) {
     return apiUnavailable("私有事件服务拒绝访问，请检查 Tunnel、VPC Service 或 Access Service Token");
+  }
+  if (isUpstreamUnreachable(upstream)) {
+    return apiUnavailable("事件服务暂时不可达，请检查后端或 Cloudflare Tunnel");
   }
   if (publicReadOnly && path[0] === "v1" && path[1] === "events" && upstream.ok) {
     const payload = sanitizePublicEvents(await upstream.json());

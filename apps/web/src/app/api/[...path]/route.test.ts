@@ -5,6 +5,7 @@ import {
   isLoopbackHost,
   isPublicApiAllowed,
   isSelfReferentialOrigin,
+  isUpstreamUnreachable,
   resolveApiOrigin,
   resolveInternalApiSecret,
   sanitizePublicEvents,
@@ -81,6 +82,36 @@ describe("API proxy origin", () => {
     expect(isAccessRejection(new Response(JSON.stringify({ error:"forbidden" }), {
       status:403,
       headers:{ "content-type":"application/json" },
+    }))).toBe(false);
+  });
+
+  it("reports a dead Tunnel as unreachable instead of echoing the edge error", () => {
+    // Cloudflare answers 530 with a short text body when the Tunnel has no
+    // origin; the browser used to receive that raw instead of the documented
+    // "事件服务暂时不可达".
+    expect(isUpstreamUnreachable(new Response("", { status:530 }))).toBe(true);
+    expect(isUpstreamUnreachable(new Response("error code: 1033", {
+      status:502,
+      headers:{ "content-type":"text/plain; charset=UTF-8" },
+    }))).toBe(true);
+    expect(isUpstreamUnreachable(new Response("gateway timeout", {
+      status:504,
+      headers:{ "content-type":"text/html" },
+    }))).toBe(true);
+  });
+
+  it("does not mistake an answer from the API for an unreachable Tunnel", () => {
+    expect(isUpstreamUnreachable(new Response(JSON.stringify({ error:{ code:"starting" } }), {
+      status:503,
+      headers:{ "content-type":"application/json" },
+    }))).toBe(false);
+    expect(isUpstreamUnreachable(new Response("[]", {
+      status:200,
+      headers:{ "content-type":"application/json" },
+    }))).toBe(false);
+    expect(isUpstreamUnreachable(new Response("forbidden", {
+      status:403,
+      headers:{ "content-type":"text/html" },
     }))).toBe(false);
   });
 
