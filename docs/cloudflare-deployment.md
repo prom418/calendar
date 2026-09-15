@@ -162,16 +162,25 @@ autouse fixture 在单测中关闭网关，这样即使 `.env` 里存在密钥�
 API 是否存活、启动 cloudflared、抓出分配到的公网域名，并**自检**「无密钥 401 / 有密钥
 200」，最后打印需要执行的 wrangler 命令。
 
-quick tunnel 的域名是随机且每次重启都变的，所以 `INTERNAL_API_URL` 要跟着更新：
+quick tunnel 的域名是随机且每次重启都变的，所以 `INTERNAL_API_URL` 要跟着更新。
+**用 Worker secret，不要用 `--var`**：
 
 ```powershell
 cd apps/web
-npx wrangler deploy --var INTERNAL_API_URL:https://<随机>.trycloudflare.com
+printf '%s' "https://<随机>.trycloudflare.com" | npx wrangler secret put INTERNAL_API_URL
 ```
 
-走控制台 Git 集成时，把 `INTERNAL_API_URL` 配成构建变量、`INTERNAL_API_SECRET` 配成
-secret。想要稳定域名，就得给账户挂一个域名（走 Access 保护的 named tunnel），或者升级
-Workers Paid 改用 VPC Service。
+`--var` 只对单次部署生效，而 Workers Builds 在 push 到 `main` 时跑的裸
+`wrangler deploy` 会把它冲掉、站点静默变空白；secret 在任何部署路径下都保留。
+`.local/arm-cloudflare.ps1` 走的就是这条路。
+
+这条链路也可以自动化：`.local/run-stack.ps1 -TunnelMode quick` 会把 quick tunnel 一起
+纳入托管 —— 隧道挂掉时自动重挂，并把新地址同步进 Worker secret，最后验证线上返回 200。
+`.\install-autostart.ps1` 注册计划任务时默认就带这个参数。
+
+走控制台 Git 集成时，把 `INTERNAL_API_SECRET` 配成 secret（`INTERNAL_API_URL` 也必须是
+secret，理由同上）。想要稳定域名，就得给账户挂一个域名（走 Access 保护的 named
+tunnel），或者升级 Workers Paid 改用 VPC Service。
 
 ## 首次上线后页面全空：`next-env.mjs` 把本机地址烤进了 Worker（2026-09-15）
 
@@ -211,8 +220,9 @@ Workers Paid 改用 VPC Service。
 
 **接线（让线上真的显示本机数据）**：该账户没有 VPC Service，只能走公网
 quick tunnel。`.local/arm-cloudflare.ps1` 一条命令做完：校验密钥 → 探活本机 API →
-起 cloudflared 并抓域名 → 自检「匿名 401 / 带密钥 200」→ 写入 `tunnel-url.txt` →
-调用 `build-cloudflare.ps1 -ApiUrl <url>` 构建并部署。
+复用或起 cloudflared 并抓域名 → 自检「匿名 401 / 带密钥 200」→ 写入 `tunnel-url.txt`
+→ `wrangler secret put INTERNAL_API_URL` → 验证线上 200。**它不重新构建**：Worker 是
+在请求时读这个 secret 的，只有代码变了才需要另跑 `build-cloudflare.ps1`。
 
 **前提是 API 的共享密钥网关必须真的开着**。本机 API 之前在跑的是加网关之前的代码，
 匿名请求也能 200；直接挂公网等于把可写 API 公开。重启 API（`dev-native.ps1` 或手动
@@ -226,10 +236,24 @@ uvicorn）后它才从根 `.env` 读到 `INTERNAL_API_SECRET` 并启用网关，
 | 公网隧道 `GET /openapi.json`（无密钥） | 401 |
 | 公网隧道 `GET /api/v1/events`（正确密钥） | 200 |
 
-**部署时必须带 `--var`**：quick tunnel 域名每次重启都变，所以
-`INTERNAL_API_URL` 不能写进 `wrangler.jsonc`，而是由 `.local/tunnel-url.txt` 记录、
-部署时用 `--var INTERNAL_API_URL:<url>` 传入。**裸跑 `npx wrangler deploy` 会把这个
-变量丢掉、站点重新变空** —— 始终通过 `build-cloudflare.ps1` 或 `arm-cloudflare.ps1` 部署。
+**`INTERNAL_API_URL` 必须由 Worker secret 承载，不能写进 `wrangler.jsonc`、也不能用
+`--var`**：quick tunnel 域名每次重启都变，所以它不能固化在配置里；而 `--var` 只对单次
+部署生效，Workers Builds 在 push 到 `main` 时跑的裸 `wrangler deploy` 会把它冲掉，
+站点会静默变空白。secret 在任何部署路径下都保留。
+
+把新地址同步进去：
+
+```powershell
+cd apps/web
+printf '%s' "https://<随机>.trycloudflare.com" | npx wrangler secret put INTERNAL_API_URL
+```
+
+或者交给 `.local/run-stack.ps1 -TunnelMode quick` 自动做（隧道重挂时它会自己调用
+`wrangler secret put`，并验证线上 200）。
+
+注意 `wrangler secret put` 有个前置坑：如果同名 `--var` 还在，会报
+`Binding name 'INTERNAL_API_URL' already in use [code: 10053]`。先跑一次不带 `--var` 的
+`npx wrangler deploy` 把它丢掉，再 `secret put`。
 
 **遗留脆弱点**：本机必须开着，cloudflared 必须常驻；隧道一停，线上立刻回到 503。
 稳定方案仍是给账户挂域名走 named tunnel，或升级 Workers Paid 用 VPC Service。
