@@ -1,4 +1,10 @@
+from uuid import UUID
+
 from httpx import AsyncClient
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from trade_calendar.models.domain import EventChange
 
 
 async def test_health_has_request_id(client: AsyncClient) -> None:
@@ -177,3 +183,32 @@ async def test_lock_and_soft_delete_flow(
     deleted = await client.delete(f"/api/v1/events/{event_id}")
     assert deleted.status_code == 204
     assert (await client.get(f"/api/v1/events/{event_id}")).status_code == 404
+
+
+async def test_change_feed_omits_soft_deleted_events_but_keeps_their_audit_rows(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    minute_event_payload: dict[str, object],
+) -> None:
+    created = await client.post("/api/v1/events", json=minute_event_payload)
+    event_id = created.json()["id"]
+
+    feed = (await client.get("/api/v1/changes")).json()
+    assert [row["event_id"] for row in feed] == [event_id]
+
+    assert (await client.delete(f"/api/v1/events/{event_id}")).status_code == 204
+
+    # The feed stops advertising an event the UI can no longer load, which is
+    # what produced the phantom "event updated" rows and the 404s.
+    assert (await client.get("/api/v1/changes")).json() == []
+
+    # The append-only audit trail is intact: the `created` row and the
+    # `deleted` row the soft delete itself recorded. Only the feed's view of
+    # them changed.
+    async with session_factory() as session:
+        remaining = await session.scalar(
+            select(func.count())
+            .select_from(EventChange)
+            .where(EventChange.event_id == UUID(event_id))
+        )
+    assert remaining == 2
