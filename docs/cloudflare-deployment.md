@@ -59,6 +59,52 @@ Healthy 不足以证明它能访问 API。前端读取设置、总览、日/周/
 参考：[Docker Compose 网络空间与依赖](https://docs.docker.com/reference/compose-file/services/)、
 [Cloudflare VPC Service 路由配置](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/)。
 
+## 迁移到 prom418/calendar（2026-09-15）
+
+上表的仓库与 Worker 属于另一个 Cloudflare 账户。工作账户
+`andrew.chen@prominenceim.com`（account id `35efe967224b7ce2325d8846583ef3d3`）
+此前没有 workers.dev 子域，因此 `wrangler deploy` 在注册子域之前必然失败。现在：
+
+- 代码已推送到 `https://github.com/prom418/calendar`（`main`，remote 名 `prom418`）；
+- 已通过 `PUT /accounts/<id>/workers/subdomain` 注册子域 `prom418`，
+  将来的正式地址是 `https://trade-calendar.prom418.workers.dev`。
+
+### 该账户的两个硬约束
+
+1. **邮箱未验证。** `wrangler deploy` 在脚本上传阶段返回
+   `code: 10034 - You need to verify your email address to use Workers`。
+   必须先在 `andrew.chen@prominenceim.com` 的收件箱点击 Cloudflare 的验证链接，
+   任何部署（本地 wrangler 或 Git 集成）在此之前都不可能成功。
+2. **没有 VPC Service。** `/accounts/<id>/vpc_services` 返回
+   `No route for that URI`，说明该账户未开通 Workers VPC。原先 `wrangler.jsonc`
+   里的 `CALENDAR_API` binding 同时指向别的账户的 `service_id`，会让
+   `wrangler deploy` 直接报错；该段已注释掉。
+
+因此云端暂时连不到本机后端。恢复方式二选一：在本账户创建 VPC Service 与 Tunnel
+后还原 binding，或把本机后端经公网 Tunnel 暴露后设置 `INTERNAL_API_URL`。
+在两者都未配置时，`/api/*` 会返回 `503 api_unavailable`，页面本身仍可正常打开。
+
+### 用 Git 集成创建 Worker
+
+Cloudflare 没有「连接 GitHub 仓库」的 API（Workers Builds 的
+`/accounts/<id>/builds/*` 只暴露 triggers、builds、环境变量和 deploy hooks，
+GitHub App 授权只能走控制台）。所以这一步必须在浏览器完成：
+
+1. Workers & Pages → Create → Workers → **Connect to Git**；
+2. 授权 Cloudflare GitHub App，选择 `prom418/calendar`（可只授权该仓库）；
+3. 构建配置：Root directory `apps/web`，Build command `npm ci && npm run cf:build`，
+   Deploy command `npx wrangler deploy`；
+4. Worker 名称保持 `trade-calendar`，监听分支 `main`。
+
+### 用 wrangler 直接发布
+
+`.open-next/` 已构建完成时可直接发布（无需重新构建）：
+
+```powershell
+cd apps/web
+npx wrangler deploy
+```
+
 ## 安全注意
 
 - GitHub 仓库保持 Private；
