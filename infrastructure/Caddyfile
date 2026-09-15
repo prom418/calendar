@@ -9,6 +9,17 @@
     reverse_proxy api:8000
   }
 
+  # The private ICS feed is served by the API, not by the Web app. It has to be
+  # routed here as well: the subscription URL is built from
+  # CALENDAR_PUBLIC_BASE_URL, which is this same origin, so without this block
+  # the URL the Settings page hands out would fall through to web:3000 and 404.
+  # The API deliberately leaves /calendar/* outside the shared-secret gate
+  # (see INTERNAL_API_SECRET_EXEMPT_PREFIXES) because calendar clients cannot
+  # send custom headers; the unguessable path token is what protects it.
+  handle /calendar/* {
+    reverse_proxy api:8000
+  }
+
   handle {
     reverse_proxy web:3000
   }
